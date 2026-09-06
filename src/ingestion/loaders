@@ -1,0 +1,182 @@
+"""
+src/ingestion/loaders.py
+
+Parses raw SEC EDGAR filing submissions (the full-submission .txt files
+downloaded by scripts/download_filings.py) into clean, structured records.
+
+Each raw .txt file is one filing submission that bundles many sub-documents
+(exhibits, certifications, the main report, etc.) inside repeated
+<DOCUMENT>...</DOCUMENT> blocks. This loader:
+
+  1. Parses the <SEC-HEADER> block once per file for filing-level metadata
+     (accession number, period of report, filed date, form type).
+  2. Scans all <DOCUMENT> blocks and extracts the one whose <TYPE> matches
+     the target form type (10-K by default), ignoring exhibits/attachments.
+  3. Strips the embedded HTML from that document down to clean text.
+  4. Returns one structured record per filing: metadata + clean text.
+
+Usage:
+    from src.ingestion.loaders import load_filing, load_all_filings
+
+    record = load_filing("data/raw/sec-edgar-filings/AAPL/10-K/000.../full-submission.txt")
+
+    records = load_all_filings("data/raw/sec-edgar-filings")
+"""
+
+import re
+from pathlib import Path
+from typing import Optional
+
+from bs4 import BeautifulSoup
+
+
+# ---------------------------------------------------------------------------
+# Header parsing
+# ---------------------------------------------------------------------------
+
+def parse_sec_header(raw_text: str) -> dict:
+    """
+    Extracts filing-level metadata from the <SEC-HEADER> block.
+    Falls back to None for any field not found rather than raising,
+    since header formatting can vary slightly across filings/years.
+    """
+
+    def extract(pattern: str) -> Optional[str]:
+        match = re.search(pattern, raw_text)
+        return match.group(1).strip() if match else None
+
+    return {
+        "accession_number": extract(r"ACCESSION NUMBER:\s*(\S+)"),
+        "form_type": extract(r"CONFORMED SUBMISSION TYPE:\s*(\S+)"),
+        "period_of_report": extract(r"CONFORMED PERIOD OF REPORT:\s*(\S+)"),
+        "filed_date": extract(r"FILED AS OF DATE:\s*(\S+)"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Document block extraction
+# ---------------------------------------------------------------------------
+
+def extract_target_document(raw_text: str, target_type: str = "10-K") -> Optional[str]:
+    """
+    Scans all <DOCUMENT>...</DOCUMENT> blocks in the raw submission and
+    returns the raw contents of the one whose <TYPE> matches target_type.
+    Returns None if no matching block is found.
+    """
+    document_blocks = re.findall(
+        r"<DOCUMENT>(.*?)</DOCUMENT>", raw_text, re.DOTALL
+    )
+
+    for block in document_blocks:
+        type_match = re.search(r"<TYPE>(\S+)", block)
+        if type_match and type_match.group(1).strip().upper() == target_type.upper():
+            return block
+
+    return None
+
+
+def html_to_clean_text(document_block: str) -> str:
+    """
+    Strips SGML tag wrappers (<TEXT>, <TYPE>, etc.) and parses the embedded
+    HTML content down to clean, readable plain text.
+    """
+    # The actual document content sits inside a <TEXT>...</TEXT> tag
+    text_match = re.search(r"<TEXT>(.*?)</TEXT>", document_block, re.DOTALL)
+    html_content = text_match.group(1) if text_match else document_block
+
+    soup = BeautifulSoup(html_content, "html.parser")
+
+    # Remove elements that never contain meaningful body text
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+
+    text = soup.get_text(separator="\n")
+
+    # Collapse excessive blank lines left behind by table/div structure
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    text = text.strip()
+
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def load_filing(filepath: str, target_type: str = "10-K") -> Optional[dict]:
+    """
+    Loads and parses a single raw filing .txt file into a structured record:
+        {
+            "ticker": str,
+            "accession_number": str,
+            "form_type": str,
+            "period_of_report": str,
+            "filed_date": str,
+            "source_path": str,
+            "text": str,
+        }
+    Returns None if the target document type isn't found in this filing.
+    Ticker is inferred from the folder structure:
+        data/raw/sec-edgar-filings/{TICKER}/{FORM_TYPE}/{ACCESSION}/full-submission.txt
+    """
+    path = Path(filepath)
+    raw_text = path.read_text(encoding="utf-8", errors="ignore")
+
+    metadata = parse_sec_header(raw_text)
+
+    document_block = extract_target_document(raw_text, target_type=target_type)
+    if document_block is None:
+        print(f"  Skipped (no {target_type} document found): {filepath}")
+        return None
+
+    clean_text = html_to_clean_text(document_block)
+
+    # Ticker is the folder 3 levels up from the file:
+    # .../sec-edgar-filings/{TICKER}/{FORM_TYPE}/{ACCESSION}/full-submission.txt
+    try:
+        ticker = path.parts[path.parts.index("sec-edgar-filings") + 1]
+    except (ValueError, IndexError):
+        ticker = None
+
+    return {
+        "ticker": ticker,
+        "accession_number": metadata["accession_number"],
+        "form_type": metadata["form_type"],
+        "period_of_report": metadata["period_of_report"],
+        "filed_date": metadata["filed_date"],
+        "source_path": str(path),
+        "text": clean_text,
+    }
+
+
+def load_all_filings(raw_dir: str, target_type: str = "10-K") -> list[dict]:
+    """
+    Walks raw_dir recursively, parses every full-submission.txt file found,
+    and returns a list of structured records (skipping any that fail to parse
+    or don't contain the target document type).
+    """
+    raw_path = Path(raw_dir)
+    txt_files = list(raw_path.rglob("*.txt"))
+
+    print(f"Found {len(txt_files)} raw filing files under {raw_dir}")
+
+    records = []
+    for filepath in txt_files:
+        try:
+            record = load_filing(str(filepath), target_type=target_type)
+            if record is not None:
+                records.append(record)
+                print(f"  Parsed: {record['ticker']} {record['accession_number']}")
+        except Exception as e:
+            print(f"  Failed to parse {filepath}: {e}")
+
+    print(f"\nSuccessfully parsed {len(records)} / {len(txt_files)} filings")
+    return records
+
+
+if __name__ == "__main__":
+    # Quick manual test: parse everything under data/raw and report counts.
+    results = load_all_filings("data/raw/sec-edgar-filings")
+    if results:
+        print("\nSample record keys:", list(results[0].keys()))
+        print("Sample text preview:\n", results[0]["text"][:500])

@@ -1,0 +1,64 @@
+"""
+Downloads SEC 10-K filings from EDGAR to build the corpus for retrieval-bench.
+
+Usage:
+    python scripts/loader.py
+
+Requires:
+    pip install sec-edgar-downloader python-dotenv
+
+SEC requires a User-Agent identifying you on all requests (name + email).
+Set SEC_EDGAR_NAME and SEC_EDGAR_EMAIL in your .env file before running.
+"""
+
+import os
+from sec_edgar_downloader import Downloader
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# --- Config ---------------------------------------------------------------
+
+YOUR_NAME = os.environ.get("SEC_EDGAR_NAME")
+YOUR_EMAIL = os.environ.get("SEC_EDGAR_EMAIL")
+
+if not YOUR_NAME or not YOUR_EMAIL:
+    raise SystemExit(
+        "Missing SEC_EDGAR_NAME / SEC_EDGAR_EMAIL environment variables.\n"
+        "Set them in your .env file before running this script."
+    )
+
+OUTPUT_DIR = "data/raw"
+
+TICKERS = [
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "NVDA",
+    "AMD",
+    "INTC",
+    "CRM",
+    "ORCL",
+]
+
+FORM_TYPE = "10-K"
+FILINGS_PER_COMPANY = 3
+
+# ---------------------------------------------------------------------------
+
+
+def main():
+    dl = Downloader(YOUR_NAME, YOUR_EMAIL, OUTPUT_DIR)
+
+    for ticker in TICKERS:
+        print(f"Downloading {FILINGS_PER_COMPANY} {FORM_TYPE} filings for {ticker}...")
+        try:
+            dl.get(FORM_TYPE, ticker, limit=FILINGS_PER_COMPANY)
+        except Exception as e:
+            print(f"  Failed for {ticker}: {e}")
+
+    print(f"\nDone. Filings saved under {OUTPUT_DIR}/sec-edgar-filings/")
+
+
+if __name__ == "__main__":
+    main()
