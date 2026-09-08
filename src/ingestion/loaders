@@ -23,6 +23,7 @@ Usage:
     records = load_all_filings("data/raw/sec-edgar-filings")
 """
 
+import json
 import re
 from pathlib import Path
 from typing import Optional
@@ -88,6 +89,15 @@ def html_to_clean_text(document_block: str) -> str:
 
     # Remove elements that never contain meaningful body text
     for tag in soup(["script", "style"]):
+        tag.decompose()
+
+    # Remove hidden XBRL tagging elements (inline XBRL viewer data,
+    # not meant to be visible/read as document text)
+    for tag in soup.find_all(style=re.compile(r"display\s*:\s*none")):
+        tag.decompose()
+
+    # Remove ix: namespaced XBRL tags if present as literal tag names
+    for tag in soup.find_all(re.compile(r"^ix:")):
         tag.decompose()
 
     text = soup.get_text(separator="\n")
@@ -174,9 +184,29 @@ def load_all_filings(raw_dir: str, target_type: str = "10-K") -> list[dict]:
     return records
 
 
+def save_records(records: list[dict], output_dir: str) -> None:
+    """
+    Saves each parsed record as its own JSON file under output_dir, named
+    {ticker}_{accession_number}.json. Creates output_dir if it doesn't exist.
+    """
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    for record in records:
+        filename = f"{record['ticker']}_{record['accession_number']}.json"
+        filepath = out_path / filename
+        filepath.write_text(
+            json.dumps(record, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    print(f"Saved {len(records)} records to {output_dir}")
+
+
 if __name__ == "__main__":
-    # Quick manual test: parse everything under data/raw and report counts.
+    # Parse everything under data/raw and save clean records to data/processed.
     results = load_all_filings("data/raw/sec-edgar-filings")
     if results:
         print("\nSample record keys:", list(results[0].keys()))
         print("Sample text preview:\n", results[0]["text"][:500])
+        save_records(results, "data/processed")
