@@ -85,7 +85,7 @@ def html_to_clean_text(document_block: str) -> str:
     text_match = re.search(r"<TEXT>(.*?)</TEXT>", document_block, re.DOTALL)
     html_content = text_match.group(1) if text_match else document_block
 
-    soup = BeautifulSoup(html_content, "html.parser")
+    soup = BeautifulSoup(html_content, "lxml-xml")
 
     # Remove elements that never contain meaningful body text
     for tag in soup(["script", "style"]):
@@ -94,10 +94,6 @@ def html_to_clean_text(document_block: str) -> str:
     # Remove hidden XBRL tagging elements (inline XBRL viewer data,
     # not meant to be visible/read as document text)
     for tag in soup.find_all(style=re.compile(r"display\s*:\s*none")):
-        tag.decompose()
-
-    # Remove ix: namespaced XBRL tags if present as literal tag names
-    for tag in soup.find_all(re.compile(r"^ix:")):
         tag.decompose()
 
     text = soup.get_text(separator="\n")
