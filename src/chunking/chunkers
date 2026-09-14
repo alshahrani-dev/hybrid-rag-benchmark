@@ -1,0 +1,133 @@
+"""
+src/chunking/chunkers.py
+
+Splits cleaned filing records (from data/processed/*.json, produced by
+src/ingestion/loaders.py) into smaller, retrievable chunks.
+
+Each input record is one full 10-K's clean text plus filing-level metadata.
+This module splits that text into a list of chunk records, each one
+inheriting the parent filing's metadata (ticker, accession number, period
+of report, filed date) plus its own chunk_id, chunk_index, and text slice.
+
+Current strategy: fixed-size word chunking with overlap. Simple, no
+document-structure awareness. A section-aware chunker can be added later
+as a second strategy to compare against this one.
+
+Usage:
+    python src/chunking/chunkers.py
+
+Output:
+    data/processed/chunks.jsonl  (one JSON object per line, one per chunk)
+"""
+
+import json
+from pathlib import Path
+from typing import Iterator
+
+
+def fixed_size_chunk_text(
+    text: str,
+    chunk_size: int = 500,
+    overlap: int = 100,
+) -> list[str]:
+    """
+    Splits text into chunks of `chunk_size` words, with `overlap` words
+    repeated between consecutive chunks so context isn't harshly cut at
+    boundaries.
+
+    Splitting is done on whitespace-separated words, not characters or
+    tokens — simple and good enough for a first chunking strategy.
+    """
+    words = text.split()
+    if not words:
+        return []
+
+    chunks = []
+    start = 0
+    step = chunk_size - overlap
+
+    while start < len(words):
+        end = start + chunk_size
+        chunk_words = words[start:end]
+        chunks.append(" ".join(chunk_words))
+
+        if end >= len(words):
+            break
+        start += step
+
+    return chunks
+
+
+def chunk_filing_record(
+    record: dict,
+    chunk_size: int = 500,
+    overlap: int = 100,
+) -> list[dict]:
+    """
+    Chunks one filing record's text and returns a list of chunk records,
+    each carrying the parent filing's metadata plus a unique chunk_id
+    and chunk_index.
+    """
+    text_chunks = fixed_size_chunk_text(record["text"], chunk_size=chunk_size, overlap=overlap)
+
+    chunk_records = []
+    for i, chunk_text in enumerate(text_chunks):
+        chunk_records.append({
+            "chunk_id": f"{record['accession_number']}_chunk_{i:04d}",
+            "ticker": record["ticker"],
+            "accession_number": record["accession_number"],
+            "form_type": record["form_type"],
+            "period_of_report": record["period_of_report"],
+            "filed_date": record["filed_date"],
+            "chunk_index": i,
+            "text": chunk_text,
+        })
+
+    return chunk_records
+
+
+def load_processed_records(processed_dir: str) -> Iterator[dict]:
+    """
+    Loads every filing record from data/processed/*.json
+    (skips chunks.jsonl itself if present from a previous run).
+    """
+    processed_path = Path(processed_dir)
+    for filepath in sorted(processed_path.glob("*.json")):
+        with open(filepath, "r", encoding="utf-8") as f:
+            yield json.load(f)
+
+
+def chunk_all_filings(
+    processed_dir: str,
+    output_path: str,
+    chunk_size: int = 500,
+    overlap: int = 100,
+) -> None:
+    """
+    Chunks every filing record in processed_dir and writes all resulting
+    chunk records to output_path as JSONL (one JSON object per line).
+    """
+    all_chunks = []
+
+    for record in load_processed_records(processed_dir):
+        chunks = chunk_filing_record(record, chunk_size=chunk_size, overlap=overlap)
+        all_chunks.extend(chunks)
+        print(f"  {record['ticker']} {record['accession_number']}: {len(chunks)} chunks")
+
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        for chunk in all_chunks:
+            f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+
+    print(f"\nWrote {len(all_chunks)} total chunks to {output_path}")
+
+
+if __name__ == "__main__":
+    chunk_all_filings(
+        processed_dir="data/processed",
+        output_path="data/processed/chunks.jsonl",
+        chunk_size=500,
+        overlap=100,
+    )

@@ -2,7 +2,7 @@
 Downloads SEC 10-K filings from EDGAR to build the corpus for retrieval-bench.
 
 Usage:
-    python scripts/loader.py
+    python download_filings.py
 
 Requires:
     pip install sec-edgar-downloader python-dotenv
